@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-import requests, json, re, os, yaml, time
-from bs4 import BeautifulSoup
+import requests, os, json, yaml, time, re
 import pandas as pd
 from datetime import datetime
 from sklearn.feature_extraction.text import CountVectorizer
@@ -13,6 +12,7 @@ with open("profile.yaml", "r") as f:
 OUTPUT_DIR = "outputs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# Target locations
 LOCATIONS = [
     "Gandhinagar",
     "Nadiad",
@@ -20,82 +20,76 @@ LOCATIONS = [
     "Surat",
     "Pune",
     "Nashik",
-    "Remote"
 ]
 
-# Updated realistic browser headers (avoids blocking)
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-}
+# include remote
+REMOTE_QUERY = "remote"
 
+# Clean text
 def clean(s):
     s = (s or "").lower()
     s = re.sub(r"[^a-z0-9\s/-]", " ", s)
     return s.strip()
 
-# ---------- INDEED FETCHER ----------
-def fetch_indeed(location):
-    query_loc = location if location.lower() != "remote" else "Remote"
+# ------------------------------
+# ADZUNA FETCHER
+# ------------------------------
+def fetch_adzuna_jobs(query, location):
+    app_id = os.getenv("ADZUNA_APP_ID")
+    app_key = os.getenv("ADZUNA_APP_KEY")
+
     url = (
-        "https://in.indeed.com/jobs?"
-        "q=QA+Tester+OR+Quality+Engineer+OR+Software+Test+Engineer+OR+SDET"
-        f"&l={query_loc}&radius=50"
+        f"https://api.adzuna.com/v1/api/jobs/in/search/1"
+        f"?app_id={app_id}&app_key={app_key}"
+        f"&results_per_page=50"
+        f"&what={query}"
+        f"&where={location}"
+        f"&content-type=application/json"
     )
 
-    jobs = []
-
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=20)
-        soup = BeautifulSoup(resp.text, "html.parser")
+        resp = requests.get(url, timeout=20)
+        data = resp.json()
 
-        cards = soup.select("a.tapItem")
-        if not cards:
-            # New Indeed fallback layout
-            cards = soup.select("div.job_seen_beacon a")
+        results = data.get("results", [])
+        jobs = []
 
-        for c in cards:
-            title_el = c.select_one("h2.jobTitle span")
-            comp_el = c.select_one("span.companyName")
-            loc_el = c.select_one("div.companyLocation")
-            desc_el = c.select_one("div.job-snippet")
-
+        for item in results:
             jobs.append({
-                "source": "indeed",
+                "source": "adzuna",
                 "location": location,
-                "title": title_el.get_text(strip=True) if title_el else "",
-                "company": comp_el.get_text(strip=True) if comp_el else "",
-                "desc": desc_el.get_text(" ", strip=True) if desc_el else "",
-                "link": "https://in.indeed.com" + c.get("href", "")
+                "title": item.get("title", ""),
+                "company": item.get("company", {}).get("display_name", ""),
+                "desc": item.get("description", ""),
+                "link": item.get("redirect_url", "")
             })
 
+        print(f"[{location}] Jobs fetched: {len(jobs)}")
+        return jobs
+
     except Exception as e:
-        print(f"Error fetching {location}: {e}")
+        print("Error fetching:", location, e)
+        return []
 
-    print(f"[{location}] Jobs fetched: {len(jobs)}")   # Debug line
-    return jobs
-
-# ---------- SCORING ----------
+# ------------------------------
+# SCORING
+# ------------------------------
 def score(job):
     text = clean(job["title"] + " " + job["desc"])
-
     score = 0
+
     # Title relevance
-    if any(k in text for k in ["qa", "quality", "test", "sdet", "tester"]):
+    if any(k in text for k in ["qa", "quality", "test", "tester", "sdet", "automation"]):
         score += 10
 
-    # Skills match
+    # Skills
     skill_score = 0
-
     for s in PROFILE["skills"]["core"]:
         if s in text:
             skill_score += 6
-
     for s in PROFILE["skills"]["secondary"]:
         if s in text:
             skill_score += 3
-
     score += min(skill_score, 40)
 
     # Domain match
@@ -103,19 +97,21 @@ def score(job):
         if d in text:
             score += 5
 
-    # Label
+    # Cap & label
     score = min(score, 100)
     job["score"] = score
     job["label"] = (
-        "Excellent" if score >= 75
-        else "Good" if score >= 60
-        else "Potential" if score >= 40
-        else "Discard"
+        "Excellent" if score >= 75 else
+        "Good" if score >= 60 else
+        "Potential" if score >= 40 else
+        "Discard"
     )
     return job
 
-# ---------- TRENDS ----------
-def trend_terms(jobs):
+# ------------------------------
+# TRENDS
+# ------------------------------
+def trending(jobs):
     docs = [clean(j["title"] + " " + j["desc"]) for j in jobs if j["desc"]]
 
     if not docs:
@@ -127,26 +123,33 @@ def trend_terms(jobs):
     terms = vectorizer.get_feature_names_out()
 
     idx = np.argsort(freqs)[::-1][:25]
-    trends = [{"term": terms[i], "count": int(freqs[i])} for i in idx]
+    trend_list = [{"term": terms[i], "count": int(freqs[i])} for i in idx]
 
-    high_demand = [t for t in trends if t["count"] >= len(docs) * 0.2]
+    high = [t for t in trend_list if t["count"] >= len(docs) * 0.2]
+    return trend_list, high
 
-    return trends, high_demand
-
-# ---------- MAIN ----------
+# ------------------------------
+# MAIN
+# ------------------------------
 def main():
     all_jobs = []
+
+    # City searches
     for loc in LOCATIONS:
-        all_jobs += fetch_indeed(loc)
-        time.sleep(1)  # polite pause
+        all_jobs += fetch_adzuna_jobs("QA Tester OR SDET OR Software Test Engineer", loc)
+        time.sleep(1)
+
+    # Remote search
+    all_jobs += fetch_adzuna_jobs("QA Tester OR SDET", REMOTE_QUERY)
 
     scored = [score(j) for j in all_jobs]
     curated = [j for j in scored if j["label"] in ("Excellent", "Good")]
 
-    trends, high = trend_terms(all_jobs)
+    trends, high = trending(all_jobs)
 
     now = datetime.now().strftime("%Y%m%d_%H%M")
 
+    # Save outputs
     pd.DataFrame(curated).to_csv(f"{OUTPUT_DIR}/jobs_{now}.csv", index=False)
 
     with open(f"{OUTPUT_DIR}/trends_{now}.json", "w") as f:
@@ -155,6 +158,7 @@ def main():
     print("---- SUMMARY ----")
     print("Total jobs scraped:", len(all_jobs))
     print("Curated matches:", len(curated))
+    print("Trend terms:", len(trends))
     print("-----------------")
 
 if __name__ == "__main__":
