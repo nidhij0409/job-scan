@@ -1,0 +1,21 @@
+experience_years: 7
+skills:
+  core:
+    - manual testing
+    - test management
+    - bug management
+    - python
+    - appium
+    - bdd
+    - behave
+  secondary:
+    - selenium
+    - allure
+    - html reporting
+domains:
+  - fintech
+  - erp
+  - healthcare
+interests:
+  - llm testing
+  - ai testing tools
