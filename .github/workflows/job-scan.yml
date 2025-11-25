@@ -1,0 +1,31 @@
+
+name: Daily Job Scan
+
+on:
+  schedule:
+    - cron: "00 07 * * 1-5"   # 7:00 UTC = 12:30 IST
+  workflow_dispatch:
+
+jobs:
+  run-job-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run job scanner
+        run: python job_scan.py
+
+      - name: Upload outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: job-scan-output
+          path: outputs/
