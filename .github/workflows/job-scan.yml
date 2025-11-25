@@ -24,7 +24,10 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run job scanner
-        run: python job_scan.py
+        run: |
+          mkdir -p outputs
+          python job_scan.py
+
 
       - name: Upload outputs
         uses: actions/upload-artifact@v4
