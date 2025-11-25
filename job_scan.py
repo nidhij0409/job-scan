@@ -14,40 +14,53 @@ OUTPUT_DIR = "outputs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 LOCATIONS = [
-    "Gandhinagar", "Nadiad", "Anand", "Surat",
-    "Pune", "Nashik", "Remote"
+    "Gandhinagar",
+    "Nadiad",
+    "Anand",
+    "Surat",
+    "Pune",
+    "Nashik",
+    "Remote"
 ]
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (JobScanBot)"
+}
 
 def clean(s):
     s = (s or "").lower()
     s = re.sub(r"[^a-z0-9\s/-]", "", s)
     return s
 
-# Fetch jobs from a simple public Naukri search proxy
-def fetch_naukri(location):
-    url = f"https://www.naukri.com/{location.lower()}-jobs"
-    headers = {"User-Agent": "Mozilla/5.0 JobScanBot"}
+# Fetch jobs from Indeed
+def fetch_indeed(location):
+    query_loc = location if location.lower() != "remote" else "Remote"
+    url = f"https://in.indeed.com/jobs?q=QA&l={query_loc}&radius=25"
+
     try:
-        r = requests.get(url, headers=headers, timeout=15)
-        soup = BeautifulSoup(r.text, "html.parser")
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
 
         jobs = []
-        for card in soup.select("article.jobTuple"):
-            title = card.select_one("a.title")
-            comp = card.select_one("a.subTitle")
-            desc = card.select_one("div.job-description")
-            link = title["href"] if title else ""
+        cards = soup.select("a.tapItem")
+
+        for c in cards:
+            title_el = c.select_one("h2.jobTitle")
+            comp_el = c.select_one("span.companyName")
+            loc_el = c.select_one("div.companyLocation")
+            desc_el = c.select_one("div.job-snippet")
 
             jobs.append({
-                "source": "naukri",
+                "source": "indeed",
                 "location": location,
-                "title": title.get_text(strip=True) if title else "",
-                "company": comp.get_text(strip=True) if comp else "",
-                "desc": desc.get_text(strip=True) if desc else "",
-                "link": link
+                "title": title_el.get_text(strip=True) if title_el else "",
+                "company": comp_el.get_text(strip=True) if comp_el else "",
+                "desc": desc_el.get_text(" ", strip=True) if desc_el else "",
+                "link": "https://in.indeed.com" + c["href"]
             })
         return jobs
-    except:
+
+    except Exception as e:
         return []
 
 def score(job):
@@ -88,6 +101,8 @@ def score(job):
 
 def trend_terms(jobs):
     docs = [clean(j["title"] + " " + j["desc"]) for j in jobs]
+    docs = [d for d in docs if d.strip()]  # skip empty rows
+
     if not docs:
         return [], []
 
@@ -99,14 +114,14 @@ def trend_terms(jobs):
     idx = np.argsort(freqs)[::-1][:25]
     trends = [{"term": terms[i], "count": int(freqs[i])} for i in idx]
 
-    high_demand = [t for t in trends if t["count"] >= len(jobs) * 0.2]
+    high_demand = [t for t in trends if t["count"] >= len(docs) * 0.2]
 
     return trends, high_demand
 
 def main():
     all_jobs = []
     for loc in LOCATIONS:
-        all_jobs += fetch_naukri(loc)
+        all_jobs += fetch_indeed(loc)
         time.sleep(1)
 
     scored = [score(j) for j in all_jobs]
@@ -121,7 +136,7 @@ def main():
     with open(f"{OUTPUT_DIR}/trends_{now}.json", "w") as f:
         json.dump({"trends": trends, "high_demand": high}, f, indent=2)
 
-    print("Finished run:", now)
+    print("Finished:", now, "Jobs:", len(all_jobs), "Curated:", len(curated))
 
 if __name__ == "__main__":
     main()
